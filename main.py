@@ -223,11 +223,17 @@ async def gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def boss(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Đang tổng hợp dữ liệu macro…")
 
+try:
     btc_d = get_binance("BTCUSDT")
     etf_d = get_yahoo("IBIT")
     dxy_d = get_yahoo("DX-Y.NYB")
     t10_d = get_yahoo("%5ETNX")
     gld_d = get_yahoo("GC%3DF")
+except Exception as e:
+    await update.message.reply_text(
+        f"❌ Lỗi lấy dữ liệu:\n{e}"
+    )
+    return
 
     btc_chg   = float(btc_d["priceChangePercent"])
     btc_price = float(btc_d["lastPrice"])

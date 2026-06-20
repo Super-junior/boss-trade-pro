@@ -5,7 +5,17 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 BOSS TRADE BOT ONLINE")
+    text = """
+🚀 BOSS TRADE MASTER BOT
+
+📈 /btc - Bitcoin
+🥇 /gold - Gold
+💵 /dxy - DXY
+🏦 /us10y - US10Y
+🏛️ /etf - Bitcoin ETF
+🧠 /boss - BOSS Score
+"""
+    await update.message.reply_text(text)
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 

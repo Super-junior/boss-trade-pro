@@ -9,10 +9,13 @@ Lệnh:
   /us10y   — US 10‑Year Treasury Yield
   /gold    — Vàng XAU/USD
   /boss    — BOSS Score tổng hợp macro
-  /alert <giá>   — Đặt cảnh báo giá BTC (VD: /alert 70000)
-  /alerts        — Xem danh sách alert đang chạy
-  /delalert <id> — Xóa alert theo ID  (VD: /delalert 3)
-  /delalert all  — Xóa tất cả alerts
+  /alert <giá>      — Đặt cảnh báo giá BTC (VD: /alert 70000)
+  /alerts           — Xem danh sách alert đang chạy
+  /delalert <id>    — Xóa alert theo ID  (VD: /delalert 3)
+  /delalert all     — Xóa tất cả alerts
+  /schedule <HH:MM> — Đặt lịch tự động gửi BOSS Score (VD: /schedule 08:00)
+  /schedule off     — Tắt lịch tự động
+  /schedule         — Xem lịch hiện tại
 
 Cài đặt:
   pip install python-telegram-bot requests
@@ -24,6 +27,7 @@ Chạy:
 import os
 import logging
 import requests
+from datetime import time as dt_time
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import (
@@ -44,6 +48,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # ─────────────────────────────────────────────
 _alert_counter: dict[int, int] = defaultdict(int)
 _alerts: dict[int, list[dict]] = defaultdict(list)
+
+# ─────────────────────────────────────────────
+# SCHEDULE STORAGE  {chat_id: "HH:MM"}
+# ─────────────────────────────────────────────
+_schedules: dict[int, str] = {}
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -77,6 +86,66 @@ def arrow(val: float) -> str:
 
 def fmt_price(p: float) -> str:
     return f"{p:,.2f}"
+
+
+def build_boss_text() -> str:
+    """Fetch all data và trả về chuỗi BOSS Score. Dùng chung cho /boss và schedule."""
+    btc_d = get_binance("BTCUSDT")
+    etf_d = get_yahoo("IBIT")
+    dxy_d = get_yahoo("DX-Y.NYB")
+    t10_d = get_yahoo("%5ETNX")
+    gld_d = get_yahoo("GC%3DF")
+
+    btc_chg   = float(btc_d["priceChangePercent"])
+    btc_price = float(btc_d["lastPrice"])
+    etf_chg   = etf_d["change_pct"]
+    dxy_chg   = dxy_d["change_pct"]
+    t10_val   = t10_d["price"]
+    t10_chg   = t10_d["change_pct"]
+    gld_chg   = gld_d["change_pct"]
+
+    score = 0.0
+    score += max(-3.0, min(3.0, btc_chg))
+    score += 1.0 if etf_chg > 0 else -1.0
+    score -= max(-1.0, min(1.0, dxy_chg))
+    if t10_val > 4.0:
+        score -= min(2.0, (t10_val - 4.0) * 0.5)
+    if gld_chg > 0.3:
+        score += 1.0
+    elif gld_chg > 0:
+        score += 0.5
+    elif gld_chg < -0.3:
+        score -= 1.0
+    else:
+        score -= 0.5
+    score = round(score, 1)
+
+    if score >= 4:
+        label, emoji = "STRONG BUY 🚀", "🟢"
+    elif score >= 2:
+        label, emoji = "BUY 📈", "🟢"
+    elif score >= 0:
+        label, emoji = "NEUTRAL ➡️", "🟡"
+    elif score >= -2:
+        label, emoji = "CAUTION ⚠️", "🟠"
+    else:
+        label, emoji = "SELL / AVOID 🚨", "🔴"
+
+    bar_pos = int(min(10, max(0, (score + 10) / 20 * 10)))
+    bar     = "█" * bar_pos + "░" * (10 - bar_pos)
+
+    return (
+        f"🧠 *BOSS SCORE — Tổng Hợp Macro*\n\n"
+        f"📈 BTC 24h:   `{btc_chg:>+.2f}%`  ({fmt_price(btc_price)} USDT)\n"
+        f"🏛️ ETF 1d:    `{etf_chg:>+.2f}%`\n"
+        f"💵 DXY 1d:    `{dxy_chg:>+.2f}%`\n"
+        f"🏦 US10Y:     `{t10_val:.3f}%`  (`{t10_chg:>+.2f}%`)\n"
+        f"🥇 Gold 1d:   `{gld_chg:>+.2f}%`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ SCORE:  `{score:>+.1f} / 10`\n"
+        f"{emoji} [{bar}]\n"
+        f"🏷️ Tín hiệu: *{label}*"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -121,6 +190,24 @@ async def _check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────
+# BACKGROUND JOB — gửi BOSS Score theo lịch
+# ─────────────────────────────────────────────
+
+async def _send_scheduled_boss(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = context.job.chat_id
+    try:
+        text = build_boss_text()
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ Không lấy được dữ liệu: `{e}`",
+            parse_mode="Markdown",
+        )
+        return
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+
+
+# ─────────────────────────────────────────────
 # COMMANDS
 # ─────────────────────────────────────────────
 
@@ -137,7 +224,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alert `<giá>`     — Đặt cảnh báo giá\n"
         "/alerts            — Xem danh sách\n"
         "/delalert `<id>`   — Xóa theo ID\n"
-        "/delalert `all`    — Xóa tất cả"
+        "/delalert `all`    — Xóa tất cả\n\n"
+        "⏰ *Lịch tự động:*\n"
+        "/schedule `<HH:MM>` — Đặt giờ gửi BOSS Score\n"
+        "/schedule `off`     — Tắt lịch\n"
+        "/schedule           — Xem lịch hiện tại"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -221,71 +312,86 @@ async def gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def boss(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Đang tổng hợp dữ liệu macro…")
-
-try:
-    btc_d = get_binance("BTCUSDT")
-    etf_d = get_yahoo("IBIT")
-    dxy_d = get_yahoo("DX-Y.NYB")
-    t10_d = get_yahoo("%5ETNX")
-    gld_d = get_yahoo("GC%3DF")
-except Exception as e:
-    await update.message.reply_text(
-        f"❌ Lỗi lấy dữ liệu:\n{e}"
-    )
-    return
-
-    btc_chg   = float(btc_d["priceChangePercent"])
-    btc_price = float(btc_d["lastPrice"])
-    etf_chg   = etf_d["change_pct"]
-    dxy_chg   = dxy_d["change_pct"]
-    t10_val   = t10_d["price"]
-    t10_chg   = t10_d["change_pct"]
-    gld_chg   = gld_d["change_pct"]
-
-    score = 0.0
-    score += max(-3.0, min(3.0, btc_chg))        # BTC ±3
-    score += 1.0 if etf_chg > 0 else -1.0        # ETF ±1
-    score -= max(-1.0, min(1.0, dxy_chg))         # DXY nghịch chiều
-    if t10_val > 4.0:                             # US10Y penalty
-        score -= min(2.0, (t10_val - 4.0) * 0.5)
-    if gld_chg > 0.3:                             # Gold
-        score += 1.0
-    elif gld_chg > 0:
-        score += 0.5
-    elif gld_chg < -0.3:
-        score -= 1.0
-    else:
-        score -= 0.5
-    score = round(score, 1)
-
-    if score >= 4:
-        label, emoji = "STRONG BUY 🚀", "🟢"
-    elif score >= 2:
-        label, emoji = "BUY 📈", "🟢"
-    elif score >= 0:
-        label, emoji = "NEUTRAL ➡️", "🟡"
-    elif score >= -2:
-        label, emoji = "CAUTION ⚠️", "🟠"
-    else:
-        label, emoji = "SELL / AVOID 🚨", "🔴"
-
-    bar_pos = int(min(10, max(0, (score + 10) / 20 * 10)))
-    bar     = "█" * bar_pos + "░" * (10 - bar_pos)
-
-    text = (
-        f"🧠 *BOSS SCORE — Tổng Hợp Macro*\n\n"
-        f"📈 BTC 24h:   `{btc_chg:>+.2f}%`  ({fmt_price(btc_price)} USDT)\n"
-        f"🏛️ ETF 1d:    `{etf_chg:>+.2f}%`\n"
-        f"💵 DXY 1d:    `{dxy_chg:>+.2f}%`\n"
-        f"🏦 US10Y:     `{t10_val:.3f}%`  (`{t10_chg:>+.2f}%`)\n"
-        f"🥇 Gold 1d:   `{gld_chg:>+.2f}%`\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ SCORE:  `{score:>+.1f} / 10`\n"
-        f"{emoji} [{bar}]\n"
-        f"🏷️ Tín hiệu: *{label}*"
-    )
+    await update.message.reply_text("🔄 Đang tổng hợp dữ liệu…")
+    text = build_boss_text()
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ──────────────────────────────────────────────
+# SCHEDULE COMMANDS
+# ──────────────────────────────────────────────
+
+async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    job_name = f"boss_schedule_{chat_id}"
+
+    # /schedule (không có arg) — xem lịch hiện tại
+    if not context.args:
+        current = _schedules.get(chat_id)
+        if current:
+            await update.message.reply_text(
+                f"⏰ Lịch hiện tại: *{current}* (UTC)\n"
+                f"Tắt lịch: `/schedule off`",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "📭 Chưa đặt lịch.\n"
+                "Đặt lịch: `/schedule 08:00`",
+                parse_mode="Markdown",
+            )
+        return
+
+    arg = context.args[0].lower()
+
+    # /schedule off — tắt lịch
+    if arg == "off":
+        jobs = context.job_queue.get_jobs_by_name(job_name)
+        for job in jobs:
+            job.schedule_removal()
+        if chat_id in _schedules:
+            del _schedules[chat_id]
+            await update.message.reply_text("✅ Đã tắt lịch tự động.")
+        else:
+            await update.message.reply_text("📭 Chưa có lịch nào để tắt.")
+        return
+
+    # /schedule HH:MM — đặt lịch mới
+    try:
+        parts = arg.split(":")
+        if len(parts) != 2:
+            raise ValueError
+        hh, mm = int(parts[0]), int(parts[1])
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Định dạng không hợp lệ.\nDùng: `/schedule HH:MM`  VD: `/schedule 08:00`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Xóa job cũ nếu có
+    for job in context.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+
+    # Đặt job mới chạy mỗi ngày theo giờ UTC
+    run_time = dt_time(hour=hh, minute=mm)
+    context.job_queue.run_daily(
+        _send_scheduled_boss,
+        time=run_time,
+        chat_id=chat_id,
+        name=job_name,
+    )
+    _schedules[chat_id] = f"{hh:02d}:{mm:02d}"
+
+    await update.message.reply_text(
+        f"✅ *Đã đặt lịch!*\n\n"
+        f"⏰ Bot sẽ gửi BOSS Score lúc *{hh:02d}:{mm:02d} UTC* mỗi ngày.\n\n"
+        f"_Xem lịch: /schedule_\n"
+        f"_Tắt lịch: /schedule off_",
+        parse_mode="Markdown",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -424,6 +530,7 @@ def main():
     app.add_handler(CommandHandler("alert",    alert))
     app.add_handler(CommandHandler("alerts",   alerts))
     app.add_handler(CommandHandler("delalert", delalert))
+    app.add_handler(CommandHandler("schedule", schedule))
 
     # Kiểm tra alerts mỗi 60 giây
     app.job_queue.run_repeating(_check_alerts, interval=60, first=10)

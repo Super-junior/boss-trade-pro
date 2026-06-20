@@ -234,12 +234,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def btc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data   = get_binance("BTCUSDT")
-    price  = float(data["lastPrice"])
-    change = float(data["priceChangePercent"])
-    volume = float(data["quoteVolume"]) / 1_000_000_000
-    high   = float(data["highPrice"])
-    low    = float(data["lowPrice"])
+    data = get_binance("BTCUSDT")
+
+    price  = float(data["price"])
+    change = float(data["change_pct"])
+    volume = float(data["volume"])
+    high   = float(data["high"])
+    low    = float(data["low"])
     text = (
         f"📈 *BTC/USDT — Binance*\n\n"
         f"💰 Giá:       `{fmt_price(price)}` USDT\n"
